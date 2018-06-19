@@ -77,9 +77,11 @@ class NRTR(object):
         def multi_head_attention(q, k, v):
             """
                 Multi-head Attention as described in paper (p.3)
+                    In the "Exploration of the core module architectures" part, the head count is set to 8
+                    This is coherent with the "All You Need Is Attention" paper (https://arxiv.org/pdf/1706.03762v5.pdf)
             """
 
-            def scaled_dot_product_attention(q, k, v):
+            def scaled_dot_product_attention(q, k, v, masked=False):
                 """
                     Scaled dot-product Attention as described in paper (p.3)
                 """
@@ -87,12 +89,58 @@ class NRTR(object):
                 # We start by doing the queries with the transposed of the keys 
                 qk = tf.matmul(q, tf.transpose(k))
 
+                if masked:
+                    
+
                 # We then softmax the result divided by the sqrt of the width of the keys
                 sm1 = tf.softmax(tf.divide(qk, tf.sqrt(tf.shape(k)[1])))
 
                 return tf.matmul(sm1, v)
 
             
+
+            return None
+
+        def position_wise_feed_forward_network(x):
+            """
+                Position-wise Feed-Forward Network as described in paper (p.4)
+            """
+
+            # Our first bias + weights set
+            w_1 = tf.random_uniform(tf.shape(x)[1:])
+            b_1 = tf.random_uniform(tf.shape(x)[1:])
+
+            # ReLU operation
+            relu_1 = tf.nn.relu(tf.add(tf.matmul(x, w_1), b_1))
+
+            # Our second bias + weights set
+            w_2 = tf.random_uniform(tf.shape(relu_1)[1:])
+            b_2 = tf.random_uniform(tf.shape(relu_1)[1:])
+
+            return tf.add(tf.matmul(relu_1, w_2), b_2)
+
+        def layer_norm(x):
+            """
+                Layer normalization as described in paper (p.4)
+            """
+
+            # I'm using the TensorFlow version, I have no reason to think that the original paper did the same thing
+            return tf.contrib.layers.layer_norm(x)
+
+
+        def encoder(x):
+            """
+                Encoder structure as described in paper (p.4)
+            """
+
+            return None
+
+        def decoder(x):
+            """
+                Decoder structure as described in paper (p.4)
+            """
+
+            return None
 
         return None
 
