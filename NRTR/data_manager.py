@@ -3,7 +3,7 @@ import os
 import numpy as np
 import config
 
-from utils import sparse_tuple_from, resize_image, label_to_array
+from utils import resize_image, label_to_array
 
 class DataManager(object):
     def __init__(self, batch_size, model_path, examples_path, max_image_width, train_test_ratio, max_char_count):

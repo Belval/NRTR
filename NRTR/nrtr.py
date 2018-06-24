@@ -23,7 +23,12 @@ class NRTR(object):
 
         # Building graph
         with self.__session.as_default():
-            TODO = self.nrtr(max_image_width, batch_size)
+            (
+                self.__inputs,
+                self.__targets,
+                self.__init,
+            ) = self.nrtr(max_image_width, batch_size)
+
             self.__init.run()
 
         with self.__session.as_default():
@@ -68,7 +73,7 @@ class NRTR(object):
 
             # batch_size x 25 x 8 x 64 
 
-            concat1 = tf.concat(bnorm2, 2)
+            concat1 = tf.reshape(bnorm2, (bnorm2.get_shape().as_list()[0:2] + [512,]))
 
             # batch_size x 25 x 512
 
@@ -90,34 +95,77 @@ class NRTR(object):
                 qk = tf.matmul(q, tf.transpose(k))
 
                 if masked:
-                    
+                    raise NotImplementedError("Masked scaled dot product is not implemented")
 
                 # We then softmax the result divided by the sqrt of the width of the keys
                 sm1 = tf.softmax(tf.divide(qk, tf.sqrt(tf.shape(k)[1])))
 
                 return tf.matmul(sm1, v)
 
+            def linear_projection(q, k, v):
+                """
+                    Linear projection of the queries, keys, and values
+                """
             
+                ql_1 = tf.layers.dense(q, q.get_shape().as_list()[1])
+                kl_1 = tf.layers.dense(k, k.get_shape().as_list()[1])
+                vl_1 = tf.layers.dense(v, v.get_shape().as_list()[1])
 
-            return None
+                return ql_1, kl_1, vl_1
+
+            def split_heads(q, k, v):
+                """
+                    Split the heads, partially taken from https://github.com/DongjunLee/transformer-tensorflow/blob/b6585fa7504f0f35327f2a3994dac7b06b6036f7/transformer/attention.py#L57
+                """
+
+                def split_last_dimension_then_transpose(tensor, num_heads, dim):
+                    print(dim)
+                    t_shape = tensor.get_shape().as_list()
+                    print(t_shape)
+                    print(t_shape[1:-1])
+                    tensor = tf.reshape(tensor, [-1] + t_shape[1:-1] + [num_heads, dim // num_heads])
+                    return tf.transpose(tensor, [0, 2, 1, 3]) # [batch_size, num_heads, max_seq_len, dim]
+
+                qs = split_last_dimension_then_transpose(q, 8, q.get_shape().as_list()[1])
+                ks = split_last_dimension_then_transpose(k, 8, k.get_shape().as_list()[1])
+                vs = split_last_dimension_then_transpose(v, 8, v.get_shape().as_list()[1])
+
+                return qs, ks, vs
+
+            def concat_heads(heads):
+                """
+                    Concatenate the result of the scaled dot-product attention
+                """
+
+                heads_t = tf.transpose(heads, [0, 2, 1, 3]) # [batch_size, max_seq_len, num_heads, dim]
+                heads_shape = heads_t.get_shape().as_list()
+                num_heads, dim = heads_shape[-2:]
+                return tf.reshape(heads_shape, [-1] + heads_shape[1:-2] + [num_heads * dim])
+
+            # So all the building blocks exists, we only have to assemble them together
+            ql, kl, vl = linear_projection(q, k, v)
+            qs, ks, vs = split_heads(ql, kl, vl)
+            sdp_1 = scaled_dot_product_attention(qs, ks, vs)
+            concat_1 = concat_heads(sdp_1)
+            linear_1 = tf.layers.dense(concat_1)
+
+            return linear_1
 
         def position_wise_feed_forward_network(x):
             """
                 Position-wise Feed-Forward Network as described in paper (p.4)
             """
 
-            # Our first bias + weights set
-            w_1 = tf.random_uniform(tf.shape(x)[1:])
-            b_1 = tf.random_uniform(tf.shape(x)[1:])
+            # First linear
+            linear_1 = tf.layers.dense(x)
 
             # ReLU operation
-            relu_1 = tf.nn.relu(tf.add(tf.matmul(x, w_1), b_1))
+            relu_1 = tf.nn.relu(linear_1)
 
-            # Our second bias + weights set
-            w_2 = tf.random_uniform(tf.shape(relu_1)[1:])
-            b_2 = tf.random_uniform(tf.shape(relu_1)[1:])
+            # Second linear
+            linear_2 = tf.layers.dense(relu_1)
 
-            return tf.add(tf.matmul(relu_1, w_2), b_2)
+            return linear_2
 
         def layer_norm(x):
             """
@@ -127,13 +175,59 @@ class NRTR(object):
             # I'm using the TensorFlow version, I have no reason to think that the original paper did the same thing
             return tf.contrib.layers.layer_norm(x)
 
+        def positional_encoding(x):
+            """
+                Not as described in paper since it lacked proper description of this step.
+                This function is based on the "Attention is all you need" paper.
+            """
+
+            dim, seq_len = x.get_shape().as_list()[-2:]
+
+            encoded_vec = np.array([pos/np.power(10000, 2*i/dim) for pos in range(seq_len) for i in range(dim)])
+            encoded_vec[::2] = np.sin(encoded_vec[::2])
+            encoded_vec[1::2] = np.cos(encoded_vec[1::2])
+            encoded_vec_tensor = tf.convert_to_tensor(encoded_vec.reshape([seq_len, dim]), dtype=tf.float32)
+
+            return tf.add(x, encoded_vec_tensor)
 
         def encoder(x):
             """
                 Encoder structure as described in paper (p.4)
             """
 
-            return None
+            # First modality transform block
+            mtb_1 = modality_transform_block(x)
+
+            print(mtb_1.get_shape().as_list())
+
+            # Linear
+            linear_1 = tf.layers.dense(mtb_1, mtb_1.get_shape().as_list()[1])
+
+            # Positional Encoding
+            positional_encoding_1 = positional_encoding(linear_1)
+
+            # Multi-Head Attention
+            mha_1 = multi_head_attention(positional_encoding_1, positional_encoding_1, positional_encoding_1)
+
+            # Layer norm 1
+            ln_1 = layer_norm(mha_1)
+
+            # Add op with previous
+            add_1 = tf.add(ln_1, positional_encoding_1)
+
+            # FFN
+            ffn_1 = position_wise_feed_forward_network(add_1)
+
+            # Layer norm 2
+            ln_2 = layer_norm(ffn_1)
+
+            # Add op with previous
+            add_2 = tf.add(ln_2, add_1)
+
+            # Layer norm 3
+            ln_3 = layer_norm(add_2)
+
+            return ln_3
 
         def decoder(x):
             """
@@ -142,7 +236,14 @@ class NRTR(object):
 
             return None
 
-        return None
+        inputs = tf.placeholder(tf.float32, [batch_size, max_width, 32, 1])
+        targets = tf.placeholder(tf.float32, [batch_size, None, config.NUM_CLASSES])
+        encoder_outputs = encoder(inputs)
+        output_probabilities = decoder(encoder_outputs, targets)
+
+        init = tf.global_variables_initializer()
+
+        return inputs, targets, init
 
     def train(self, iteration_count):
         with self.__session.as_default():
@@ -190,4 +291,3 @@ class NRTR(object):
                 for i, y in enumerate(batch_y):
                     print(batch_y[i])
                     print(ground_truth_to_word(decoded[i]))
-return None
