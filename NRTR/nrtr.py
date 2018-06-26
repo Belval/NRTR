@@ -92,13 +92,13 @@ class NRTR(object):
                 """
 
                 # We start by doing the queries with the transposed of the keys 
-                qk = tf.matmul(q, tf.transpose(k))
+                qk = tf.matmul(q, k, transpose_b=True)
 
                 if masked:
                     raise NotImplementedError("Masked scaled dot product is not implemented")
 
                 # We then softmax the result divided by the sqrt of the width of the keys
-                sm1 = tf.softmax(tf.divide(qk, tf.sqrt(tf.shape(k)[1])))
+                sm1 = tf.nn.softmax(tf.divide(qk, k.get_shape().as_list()[-1]**0.5))
 
                 return tf.matmul(sm1, v)
 
@@ -107,9 +107,9 @@ class NRTR(object):
                     Linear projection of the queries, keys, and values
                 """
             
-                ql_1 = tf.layers.dense(q, q.get_shape().as_list()[1])
-                kl_1 = tf.layers.dense(k, k.get_shape().as_list()[1])
-                vl_1 = tf.layers.dense(v, v.get_shape().as_list()[1])
+                ql_1 = tf.layers.dense(q, q.get_shape().as_list()[2])
+                kl_1 = tf.layers.dense(k, k.get_shape().as_list()[2])
+                vl_1 = tf.layers.dense(v, v.get_shape().as_list()[2])
 
                 return ql_1, kl_1, vl_1
 
@@ -119,16 +119,13 @@ class NRTR(object):
                 """
 
                 def split_last_dimension_then_transpose(tensor, num_heads, dim):
-                    print(dim)
                     t_shape = tensor.get_shape().as_list()
-                    print(t_shape)
-                    print(t_shape[1:-1])
                     tensor = tf.reshape(tensor, [-1] + t_shape[1:-1] + [num_heads, dim // num_heads])
                     return tf.transpose(tensor, [0, 2, 1, 3]) # [batch_size, num_heads, max_seq_len, dim]
 
-                qs = split_last_dimension_then_transpose(q, 8, q.get_shape().as_list()[1])
-                ks = split_last_dimension_then_transpose(k, 8, k.get_shape().as_list()[1])
-                vs = split_last_dimension_then_transpose(v, 8, v.get_shape().as_list()[1])
+                qs = split_last_dimension_then_transpose(q, 8, q.get_shape().as_list()[2])
+                ks = split_last_dimension_then_transpose(k, 8, k.get_shape().as_list()[2])
+                vs = split_last_dimension_then_transpose(v, 8, v.get_shape().as_list()[2])
 
                 return qs, ks, vs
 
@@ -140,14 +137,14 @@ class NRTR(object):
                 heads_t = tf.transpose(heads, [0, 2, 1, 3]) # [batch_size, max_seq_len, num_heads, dim]
                 heads_shape = heads_t.get_shape().as_list()
                 num_heads, dim = heads_shape[-2:]
-                return tf.reshape(heads_shape, [-1] + heads_shape[1:-2] + [num_heads * dim])
+                return tf.reshape(heads_t, [-1] + heads_shape[1:-2] + [num_heads * dim])
 
             # So all the building blocks exists, we only have to assemble them together
             ql, kl, vl = linear_projection(q, k, v)
             qs, ks, vs = split_heads(ql, kl, vl)
             sdp_1 = scaled_dot_product_attention(qs, ks, vs)
             concat_1 = concat_heads(sdp_1)
-            linear_1 = tf.layers.dense(concat_1)
+            linear_1 = tf.layers.dense(concat_1, concat_1.get_shape().as_list()[-1])
 
             return linear_1
 
@@ -157,13 +154,13 @@ class NRTR(object):
             """
 
             # First linear
-            linear_1 = tf.layers.dense(x)
+            linear_1 = tf.layers.dense(x, x.get_shape().as_list()[-1])
 
             # ReLU operation
             relu_1 = tf.nn.relu(linear_1)
 
             # Second linear
-            linear_2 = tf.layers.dense(relu_1)
+            linear_2 = tf.layers.dense(relu_1, relu_1.get_shape().as_list()[-1])
 
             return linear_2
 
@@ -181,7 +178,7 @@ class NRTR(object):
                 This function is based on the "Attention is all you need" paper.
             """
 
-            dim, seq_len = x.get_shape().as_list()[-2:]
+            seq_len, dim = x.get_shape().as_list()[-2:]
 
             encoded_vec = np.array([pos/np.power(10000, 2*i/dim) for pos in range(seq_len) for i in range(dim)])
             encoded_vec[::2] = np.sin(encoded_vec[::2])
@@ -198,10 +195,8 @@ class NRTR(object):
             # First modality transform block
             mtb_1 = modality_transform_block(x)
 
-            print(mtb_1.get_shape().as_list())
-
             # Linear
-            linear_1 = tf.layers.dense(mtb_1, mtb_1.get_shape().as_list()[1])
+            linear_1 = tf.layers.dense(mtb_1, mtb_1.get_shape().as_list()[2])
 
             # Positional Encoding
             positional_encoding_1 = positional_encoding(linear_1)
@@ -217,7 +212,7 @@ class NRTR(object):
 
             # FFN
             ffn_1 = position_wise_feed_forward_network(add_1)
-
+            
             # Layer norm 2
             ln_2 = layer_norm(ffn_1)
 
