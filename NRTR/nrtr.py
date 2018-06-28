@@ -219,22 +219,37 @@ class NRTR(object):
             # Add op with previous
             add_2 = tf.add(ln_2, add_1)
 
-            # Layer norm 3
-            ln_3 = layer_norm(add_2)
-
-            return ln_3
+            return add_2
 
         def decoder(x):
             """
                 Decoder structure as described in paper (p.4)
             """
 
-            return None
+            return x
 
         inputs = tf.placeholder(tf.float32, [batch_size, max_width, 32, 1])
         targets = tf.placeholder(tf.float32, [batch_size, None, config.NUM_CLASSES])
-        encoder_outputs = encoder(inputs)
-        output_probabilities = decoder(encoder_outputs, targets)
+
+        # Here 6 is arbitrary, according to paper is could be anywhere between 4 and 12
+        for _ in range(6):
+            encoder_outputs = encoder(inputs)
+
+        encoder_outputs = layer_norm(encoder_outputs)
+
+        # Here 6 is arbitrary, according to paper is could be anywhere between 4 and 12
+        for _ in range(6):
+            decoder_outputs = decoder(encoder_outputs)
+
+        decoder_outputs = layer_norm(decoder_outputs)
+
+        output_probabilities = tf.layers.dense(decoder_outputs, config.NUM_CLASSES, activation=tf.contrib.layers.softmax)
+
+        # Original paper does not mention a loss or cost function
+        loss = tf.losses.softmax_cross_entropy(targets, output_probabilities)
+
+        # Learning rate is defined by a formula in the original paper. The 0.001 value is a placeholder
+        optimizer = tf.train.AdamOptimizer(learning_rate=0.001, beta1=0.9, beta2=0.98, epsilon=1e-9).minimize(loss)
 
         init = tf.global_variables_initializer()
 
