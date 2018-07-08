@@ -6,11 +6,9 @@ import config
 from utils import resize_image, label_to_array
 
 class DataManager(object):
-    def __init__(self, batch_size, model_path, examples_path, max_image_width, train_test_ratio, max_char_count):
+    def __init__(self, batch_size, model_path, examples_path, max_image_width, train_test_ratio):
         if train_test_ratio > 1.0 or train_test_ratio < 0:
             raise Exception('Incoherent ratio!')
-
-        print(train_test_ratio)
 
         self.train_test_ratio = train_test_ratio
         self.max_image_width = max_image_width
@@ -18,7 +16,7 @@ class DataManager(object):
         self.model_path = model_path
         self.current_train_offset = 0
         self.examples_path = examples_path
-        self.max_char_count = max_char_count
+        self.max_char_count = 25
         self.data, self.data_len = self.__load_data()
         self.test_offset = int(train_test_ratio * self.data_len)
         self.current_test_offset = self.test_offset
@@ -70,11 +68,9 @@ class DataManager(object):
                 (-1)
             )
 
-            batch_dt = sparse_tuple_from(
-                np.reshape(
-                    np.array(raw_batch_la),
-                    (-1)
-                )
+            batch_dt = np.reshape(
+                np.array(raw_batch_la),
+                (-1, 25, 512)
             )
 
             batch_x = np.reshape(
@@ -101,11 +97,9 @@ class DataManager(object):
                 (-1)
             )
 
-            batch_dt = sparse_tuple_from(
-                np.reshape(
-                    np.array(raw_batch_la),
-                    (-1)
-                )
+            batch_dt = np.reshape(
+                np.array(raw_batch_la),
+                (-1, 25, 512)
             )
 
             batch_x = np.reshape(

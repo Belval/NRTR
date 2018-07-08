@@ -26,6 +26,9 @@ class NRTR(object):
             (
                 self.__inputs,
                 self.__targets,
+                self.__output,
+                self.__loss,
+                self.__optimizer,
                 self.__init,
             ) = self.nrtr(max_image_width, batch_size)
 
@@ -43,7 +46,7 @@ class NRTR(object):
                     self.__saver.restore(self.__session, ckpt)
 
         # Creating data_manager
-        self.__data_manager = DataManager(batch_size, model_path, examples_path, max_image_width, train_test_ratio, self.__max_char_count)
+        self.__data_manager = DataManager(batch_size, model_path, examples_path, max_image_width, train_test_ratio)
 
     def nrtr(self, max_width, batch_size):
         """
@@ -192,23 +195,14 @@ class NRTR(object):
                 Encoder structure as described in paper (p.4)
             """
 
-            # First modality transform block
-            mtb_1 = modality_transform_block(x)
-
-            # Linear
-            linear_1 = tf.layers.dense(mtb_1, mtb_1.get_shape().as_list()[2])
-
-            # Positional Encoding
-            positional_encoding_1 = positional_encoding(linear_1)
-
             # Multi-Head Attention
-            mha_1 = multi_head_attention(positional_encoding_1, positional_encoding_1, positional_encoding_1)
+            mha_1 = multi_head_attention(x, x, x)
 
             # Layer norm 1
             ln_1 = layer_norm(mha_1)
 
             # Add op with previous
-            add_1 = tf.add(ln_1, positional_encoding_1)
+            add_1 = tf.add(ln_1, x)
 
             # FFN
             ffn_1 = position_wise_feed_forward_network(add_1)
@@ -221,29 +215,68 @@ class NRTR(object):
 
             return add_2
 
-        def decoder(x):
+        def decoder(x, targets):
             """
                 Decoder structure as described in paper (p.4)
             """
 
-            return x
+            # Positional encoding
+            positional_encoding_1 = positional_encoding(targets)
+
+            # Multi-Head Attention
+            mha_1 = multi_head_attention(positional_encoding_1, positional_encoding_1, positional_encoding_1)
+
+            # Layer norm 1
+            ln_1 = layer_norm(mha_1)
+
+            # Add op with previous
+            add_1 = tf.add(ln_1, targets)
+
+            # Multi-Head Attention
+            mha_2 = multi_head_attention(x, x, positional_encoding_1)
+
+            # Layer norm 2
+            ln_2 = layer_norm(mha_2)
+
+            # Add op with previous
+            add_2 = tf.add(ln_2, add_1)
+
+            # FFN
+            ffn_1 = position_wise_feed_forward_network(add_2)
+
+            # Layer norm 3
+            ln_3 = layer_norm(ffn_1)
+
+            # Add op with previous
+            add_3 = tf.add(ln_3, add_2)
+
+            return add_3
 
         inputs = tf.placeholder(tf.float32, [batch_size, max_width, 32, 1])
         targets = tf.placeholder(tf.float32, [batch_size, None, config.NUM_CLASSES])
 
-        # Here 6 is arbitrary, according to paper is could be anywhere between 4 and 12
+        # First modality transform block
+        mtb_1 = modality_transform_block(inputs)
+
+        # Linear
+        linear_1 = tf.layers.dense(mtb_1, mtb_1.get_shape().as_list()[2])
+
+        # Positional Encoding
+        positional_encoding_1 = positional_encoding(linear_1)
+
+        # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
         for _ in range(6):
-            encoder_outputs = encoder(inputs)
+            encoder_outputs = encoder(positional_encoding_1)
 
         encoder_outputs = layer_norm(encoder_outputs)
 
-        # Here 6 is arbitrary, according to paper is could be anywhere between 4 and 12
+        # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
         for _ in range(6):
-            decoder_outputs = decoder(encoder_outputs)
+            decoder_outputs = decoder(encoder_outputs, tf.zeros([batch_size, mtb_1.get_shape().as_list()[1], config.NUM_CLASSES]))
 
         decoder_outputs = layer_norm(decoder_outputs)
 
-        output_probabilities = tf.layers.dense(decoder_outputs, config.NUM_CLASSES, activation=tf.contrib.layers.softmax)
+        output_probabilities = tf.layers.dense(decoder_outputs, mtb_1.get_shape().as_list()[2], activation=tf.contrib.layers.softmax)
 
         # Original paper does not mention a loss or cost function
         loss = tf.losses.softmax_cross_entropy(targets, output_probabilities)
@@ -253,7 +286,7 @@ class NRTR(object):
 
         init = tf.global_variables_initializer()
 
-        return inputs, targets, init
+        return inputs, targets, output_probabilities, loss, optimizer, init
 
     def train(self, iteration_count):
         with self.__session.as_default():
@@ -261,18 +294,18 @@ class NRTR(object):
             for i in range(self.step, iteration_count + self.step):
                 iter_loss = 0
                 for batch_y, batch_dt, batch_x in self.__data_manager.train_batches:
-                    op, decoded, loss_value = self.__session.run(
-                        [self.__optimizer, self.__decoded, self.__cost],
+                    _, output, loss_value = self.__session.run(
+                        [self.__optimizer, self.__output, self.__loss],
                         feed_dict={
                             self.__inputs: batch_x,
                             self.__targets: batch_dt
                         }
                     )
 
-                    if i % 10 == 0:
+                    if i % 100 == 0:
                         for j in range(2):
                             print(batch_y[j])
-                            print(ground_truth_to_word(decoded[j]))
+                            print(ground_truth_to_word(output[j]))
 
                     iter_loss += loss_value
 
@@ -291,8 +324,8 @@ class NRTR(object):
         with self.__session.as_default():
             print('Testing')
             for batch_y, _, batch_x in self.__data_manager.test_batches:
-                decoded = self.__session.run(
-                    self.__decoded,
+                output = self.__session.run(
+                    self.__output,
                     feed_dict={
                         self.__inputs: batch_x,
                     }
@@ -300,4 +333,4 @@ class NRTR(object):
 
                 for i, y in enumerate(batch_y):
                     print(batch_y[i])
-                    print(ground_truth_to_word(decoded[i]))
+                    print(ground_truth_to_word(output[i]))

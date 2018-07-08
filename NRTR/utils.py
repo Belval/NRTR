@@ -25,7 +25,10 @@ def resize_image(image, input_width):
 
 def label_to_array(label):
     try:
-        return [config.CHAR_VECTOR.index(x) for x in label]
+        label_array = np.zeros((25, 512))
+        for i, x in enumerate(label):
+            label_array[i, config.CHAR_VECTOR.index(x)] = 1
+        return label_array
     except Exception as ex:
         print(label)
         raise ex
@@ -36,7 +39,7 @@ def ground_truth_to_word(ground_truth):
     """
 
     try:
-        return ''.join([config.CHAR_VECTOR[i] for i in ground_truth if i != -1])
+        return ''.join([config.CHAR_VECTOR[np.argmax(arr)] for arr in ground_truth if np.argmax(arr) < len(config.CHAR_VECTOR)])
     except Exception as ex:
         print(ground_truth)
         print(ex)

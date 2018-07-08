@@ -56,7 +56,7 @@ def parse_arguments():
         type=int,
         nargs="?",
         help="How many iteration in training",
-        default=10
+        default=1000
     )
     parser.add_argument(
         "-miw",
