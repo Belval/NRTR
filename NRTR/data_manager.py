@@ -34,7 +34,9 @@ class DataManager(object):
 
         count = 0
         skipped = 0
-        for f in os.listdir(self.examples_path):
+        for i, f in enumerate(os.listdir(self.examples_path)):
+            if i > 50000:
+                break
             if len(f.split('_')[0]) > self.max_char_count:
                 continue
             arr, initial_len = resize_image(
@@ -44,11 +46,13 @@ class DataManager(object):
             examples.append(
                 (
                     arr,
-                    f.split('_')[0],
-                    label_to_array(f.split('_')[0])
+                    f.split('_')[0].lower(),
+                    label_to_array(f.split('_')[0].lower())
                 )
             )
             count += 1
+
+        print(count)
 
         return examples, len(examples)
 
@@ -70,7 +74,7 @@ class DataManager(object):
 
             batch_dt = np.reshape(
                 np.array(raw_batch_la),
-                (-1, 25, 512)
+                (-1, 25, config.NUM_CLASSES)
             )
 
             batch_x = np.reshape(
@@ -99,7 +103,7 @@ class DataManager(object):
 
             batch_dt = np.reshape(
                 np.array(raw_batch_la),
-                (-1, 25, 512)
+                (-1, 25, config.NUM_CLASSES)
             )
 
             batch_x = np.reshape(

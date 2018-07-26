@@ -1,7 +1,8 @@
 # Constants
 
 # Supported characters
-CHAR_VECTOR = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-'.!?,\""
+# First token represents "nothing"
+CHAR_VECTOR = "*0123456789abcdefghijklmnopqrstuvwxyz-'.!?,\""
 
 # Number of classes
-NUM_CLASSES = 512 #len(CHAR_VECTOR) + 1
+NUM_CLASSES = 64 #len(CHAR_VECTOR) + 1

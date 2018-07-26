@@ -26,10 +26,15 @@ class NRTR(object):
             (
                 self.__inputs,
                 self.__targets,
+                self.__iteration_n,
+                self.__is_training,
                 self.__output,
                 self.__loss,
+                self.__learning_rate,
                 self.__optimizer,
                 self.__init,
+                self.__a1,
+                self.__a2
             ) = self.nrtr(max_image_width, batch_size)
 
             self.__init.run()
@@ -82,37 +87,56 @@ class NRTR(object):
 
             return concat1
         
-        def multi_head_attention(q, k, v):
+        def multi_head_attention(q, k, v, is_training, masked=False):
             """
                 Multi-head Attention as described in paper (p.3)
                     In the "Exploration of the core module architectures" part, the head count is set to 8
                     This is coherent with the "All You Need Is Attention" paper (https://arxiv.org/pdf/1706.03762v5.pdf)
             """
 
-            def scaled_dot_product_attention(q, k, v, masked=False):
+            def scaled_dot_product_attention(q, k, v, qs, ks, vs, masked=False):
                 """
                     Scaled dot-product Attention as described in paper (p.3)
                 """
 
                 # We start by doing the queries with the transposed of the keys 
-                qk = tf.matmul(q, k, transpose_b=True)
+                qk = tf.matmul(qs, tf.transpose(ks, [0, 2, 1]))
+
+                div_qk = tf.divide(qk, 64**0.5)
+
+                # Key Masking
+                key_masks = tf.sign(tf.abs(tf.reduce_sum(k, axis=-1))) # (N, T_k)
+                key_masks = tf.tile(key_masks, [8, 1]) # (h*N, T_k)
+                key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(q)[1], 1]) # (h*N, T_q, T_k)
+                paddings = tf.ones_like(div_qk)*(-2**32+1)
+                div_qk = tf.where(tf.equal(key_masks, 0), paddings, div_qk) # (h*N, T_q, T_k)
 
                 if masked:
-                    raise NotImplementedError("Masked scaled dot product is not implemented")
+                    diag_vals = tf.ones_like(div_qk[0, :, :]) # (T_q, T_k)
+                    tril = tf.contrib.linalg.LinearOperatorLowerTriangular(diag_vals).to_dense() # (T_q, T_k)
+                    masks = tf.tile(tf.expand_dims(tril, 0), [tf.shape(div_qk)[0], 1, 1]) # (h*N, T_q, T_k)
+                    paddings = tf.ones_like(masks)*(-2**32+1)
+                    div_qk = tf.where(tf.equal(masks, 0), paddings, div_qk) # (h*N, T_q, T_k)
 
                 # We then softmax the result divided by the sqrt of the width of the keys
-                sm1 = tf.nn.softmax(tf.divide(qk, k.get_shape().as_list()[-1]**0.5))
+                sm1 = tf.nn.softmax(div_qk)
 
-                return tf.matmul(sm1, v)
+                # Query masking
+                query_masks = tf.sign(tf.abs(tf.reduce_sum(q, axis=-1))) # (N, T_q)
+                query_masks = tf.tile(query_masks, [8, 1]) # (h*N, T_q)
+                query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(k)[1]]) # (h*N, T_q, T_k)
+                sm1 *= query_masks
+
+                return tf.matmul(sm1, vs)
 
             def linear_projection(q, k, v):
                 """
                     Linear projection of the queries, keys, and values
                 """
             
-                ql_1 = tf.layers.dense(q, q.get_shape().as_list()[2])
-                kl_1 = tf.layers.dense(k, k.get_shape().as_list()[2])
-                vl_1 = tf.layers.dense(v, v.get_shape().as_list()[2])
+                ql_1 = tf.layers.dense(q, q.get_shape().as_list()[2], activation=tf.nn.relu)
+                kl_1 = tf.layers.dense(k, k.get_shape().as_list()[2], activation=tf.nn.relu)
+                vl_1 = tf.layers.dense(v, v.get_shape().as_list()[2], activation=tf.nn.relu)
 
                 return ql_1, kl_1, vl_1
 
@@ -121,14 +145,9 @@ class NRTR(object):
                     Split the heads, partially taken from https://github.com/DongjunLee/transformer-tensorflow/blob/b6585fa7504f0f35327f2a3994dac7b06b6036f7/transformer/attention.py#L57
                 """
 
-                def split_last_dimension_then_transpose(tensor, num_heads, dim):
-                    t_shape = tensor.get_shape().as_list()
-                    tensor = tf.reshape(tensor, [-1] + t_shape[1:-1] + [num_heads, dim // num_heads])
-                    return tf.transpose(tensor, [0, 2, 1, 3]) # [batch_size, num_heads, max_seq_len, dim]
-
-                qs = split_last_dimension_then_transpose(q, 8, q.get_shape().as_list()[2])
-                ks = split_last_dimension_then_transpose(k, 8, k.get_shape().as_list()[2])
-                vs = split_last_dimension_then_transpose(v, 8, v.get_shape().as_list()[2])
+                qs = tf.concat(tf.split(q, 8, axis=2), axis=0)
+                ks = tf.concat(tf.split(k, 8, axis=2), axis=0)
+                vs = tf.concat(tf.split(v, 8, axis=2), axis=0)
 
                 return qs, ks, vs
 
@@ -137,21 +156,18 @@ class NRTR(object):
                     Concatenate the result of the scaled dot-product attention
                 """
 
-                heads_t = tf.transpose(heads, [0, 2, 1, 3]) # [batch_size, max_seq_len, num_heads, dim]
-                heads_shape = heads_t.get_shape().as_list()
-                num_heads, dim = heads_shape[-2:]
-                return tf.reshape(heads_t, [-1] + heads_shape[1:-2] + [num_heads * dim])
+                return tf.concat(tf.split(heads, 8, axis=0), axis=2)
 
             # So all the building blocks exists, we only have to assemble them together
             ql, kl, vl = linear_projection(q, k, v)
             qs, ks, vs = split_heads(ql, kl, vl)
-            sdp_1 = scaled_dot_product_attention(qs, ks, vs)
+            sdp_1 = scaled_dot_product_attention(q, k, v, qs, ks, vs, masked)
             concat_1 = concat_heads(sdp_1)
             linear_1 = tf.layers.dense(concat_1, concat_1.get_shape().as_list()[-1])
 
-            return linear_1
+            return tf.layers.dropout(linear_1, 0.1, is_training)
 
-        def position_wise_feed_forward_network(x):
+        def position_wise_feed_forward_network(x, is_training):
             """
                 Position-wise Feed-Forward Network as described in paper (p.4)
             """
@@ -165,7 +181,7 @@ class NRTR(object):
             # Second linear
             linear_2 = tf.layers.dense(relu_1, relu_1.get_shape().as_list()[-1])
 
-            return linear_2
+            return tf.layers.dropout(linear_2, 0.1, is_training)
 
         def layer_norm(x):
             """
@@ -182,21 +198,19 @@ class NRTR(object):
             """
 
             seq_len, dim = x.get_shape().as_list()[-2:]
-
             encoded_vec = np.array([pos/np.power(10000, 2*i/dim) for pos in range(seq_len) for i in range(dim)])
             encoded_vec[::2] = np.sin(encoded_vec[::2])
             encoded_vec[1::2] = np.cos(encoded_vec[1::2])
             encoded_vec_tensor = tf.convert_to_tensor(encoded_vec.reshape([seq_len, dim]), dtype=tf.float32)
-
             return tf.add(x, encoded_vec_tensor)
 
-        def encoder(x):
+        def encoder(x, is_training):
             """
                 Encoder structure as described in paper (p.4)
             """
 
             # Multi-Head Attention
-            mha_1 = multi_head_attention(x, x, x)
+            mha_1 = multi_head_attention(x, x, x, is_training)
 
             # Layer norm 1
             ln_1 = layer_norm(mha_1)
@@ -205,7 +219,7 @@ class NRTR(object):
             add_1 = tf.add(ln_1, x)
 
             # FFN
-            ffn_1 = position_wise_feed_forward_network(add_1)
+            ffn_1 = position_wise_feed_forward_network(add_1, is_training)
             
             # Layer norm 2
             ln_2 = layer_norm(ffn_1)
@@ -215,16 +229,13 @@ class NRTR(object):
 
             return add_2
 
-        def decoder(x, targets):
+        def decoder(x, positional_encoding, is_training):
             """
                 Decoder structure as described in paper (p.4)
             """
 
-            # Positional encoding
-            positional_encoding_1 = positional_encoding(targets)
-
             # Multi-Head Attention
-            mha_1 = multi_head_attention(positional_encoding_1, positional_encoding_1, positional_encoding_1)
+            mha_1 = multi_head_attention(positional_encoding, positional_encoding, positional_encoding, is_training, masked=True)
 
             # Layer norm 1
             ln_1 = layer_norm(mha_1)
@@ -233,7 +244,7 @@ class NRTR(object):
             add_1 = tf.add(ln_1, targets)
 
             # Multi-Head Attention
-            mha_2 = multi_head_attention(x, x, positional_encoding_1)
+            mha_2 = multi_head_attention(x, x, positional_encoding, is_training)
 
             # Layer norm 2
             ln_2 = layer_norm(mha_2)
@@ -242,7 +253,7 @@ class NRTR(object):
             add_2 = tf.add(ln_2, add_1)
 
             # FFN
-            ffn_1 = position_wise_feed_forward_network(add_2)
+            ffn_1 = position_wise_feed_forward_network(add_2, is_training)
 
             # Layer norm 3
             ln_3 = layer_norm(ffn_1)
@@ -253,7 +264,11 @@ class NRTR(object):
             return add_3
 
         inputs = tf.placeholder(tf.float32, [batch_size, max_width, 32, 1])
-        targets = tf.placeholder(tf.float32, [batch_size, None, config.NUM_CLASSES])
+        targets = tf.placeholder(tf.float32, [batch_size, 25, config.NUM_CLASSES])
+        # The iteration number, used in calculating the learning rate
+        iteration_n = tf.placeholder(tf.float32, [1])
+        # Define if we are training, used by dropout layers
+        is_training = tf.placeholder(tf.bool, name='is_training')
 
         # First modality transform block
         mtb_1 = modality_transform_block(inputs)
@@ -266,27 +281,37 @@ class NRTR(object):
 
         # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
         for _ in range(6):
-            encoder_outputs = encoder(positional_encoding_1)
+            encoder_outputs = encoder(positional_encoding_1, is_training)
 
         encoder_outputs = layer_norm(encoder_outputs)
 
+        print(encoder_outputs.get_shape().as_list())
+
+        # Positional encoding
+        positional_encoding_2 = positional_encoding(targets)
+
         # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
-        for _ in range(6):
-            decoder_outputs = decoder(encoder_outputs, tf.zeros([batch_size, mtb_1.get_shape().as_list()[1], config.NUM_CLASSES]))
+        for i in range(6):
+            decoder_outputs = decoder(encoder_outputs if i == 0 else decoder_outputs, positional_encoding_2, is_training)
 
         decoder_outputs = layer_norm(decoder_outputs)
 
-        output_probabilities = tf.layers.dense(decoder_outputs, mtb_1.get_shape().as_list()[2], activation=tf.contrib.layers.softmax)
+        print(decoder_outputs.get_shape().as_list())
+
+        output_probabilities = tf.layers.dense(decoder_outputs, config.NUM_CLASSES, activation=tf.contrib.layers.softmax)
 
         # Original paper does not mention a loss or cost function
         loss = tf.losses.softmax_cross_entropy(targets, output_probabilities)
 
+        # I did not implement pretraining so we'll use only the relevant part of the equation presented p.5
+        learning_rate = tf.reduce_sum(tf.pow(tf.cast(mtb_1.get_shape().as_list()[2], tf.float32) / 10, -0.5) * tf.pow(iteration_n, -0.5))
+
         # Learning rate is defined by a formula in the original paper. The 0.001 value is a placeholder
-        optimizer = tf.train.AdamOptimizer(learning_rate=0.001, beta1=0.9, beta2=0.98, epsilon=1e-9).minimize(loss)
+        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.9, beta2=0.98, epsilon=1e-9).minimize(loss)
 
         init = tf.global_variables_initializer()
 
-        return inputs, targets, output_probabilities, loss, optimizer, init
+        return inputs, targets, iteration_n, is_training, output_probabilities, loss, learning_rate, optimizer, init, encoder_outputs, decoder_outputs
 
     def train(self, iteration_count):
         with self.__session.as_default():
@@ -294,18 +319,30 @@ class NRTR(object):
             for i in range(self.step, iteration_count + self.step):
                 iter_loss = 0
                 for batch_y, batch_dt, batch_x in self.__data_manager.train_batches:
-                    _, output, loss_value = self.__session.run(
-                        [self.__optimizer, self.__output, self.__loss],
+                    _, output, loss_value, learning_rate, a1, a2 = self.__session.run(
+                        [self.__optimizer, self.__output, self.__loss, self.__learning_rate, self.__a1, self.__a2],
                         feed_dict={
                             self.__inputs: batch_x,
-                            self.__targets: batch_dt
+                            self.__targets: batch_dt,
+                            self.__iteration_n: [float(i) + 1.], # +1 because 0^(0.5) is undefined obviously
+                            self.__is_training: True
                         }
                     )
+
+                    ##print('------------')
+                    ##print(a1[0][0][200:215])
+                    ##print(a2[0][0][0:15])
+                    ##print(output[0][0][0:15])
+                    ##print('------------')
+                    ##print(a1[1][0][200:215])
+                    ##print(a2[1][0][0:15])
+                    ##input(output[1][0][0:15])
 
                     if i % 100 == 0:
                         for j in range(2):
                             print(batch_y[j])
                             print(ground_truth_to_word(output[j]))
+                        print(output[0][0][0:15])
 
                     iter_loss += loss_value
 
@@ -328,6 +365,7 @@ class NRTR(object):
                     self.__output,
                     feed_dict={
                         self.__inputs: batch_x,
+                        self.__is_training: False
                     }
                 )
 
