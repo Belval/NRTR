@@ -26,11 +26,24 @@ def resize_image(image, input_width):
 def label_to_array(label):
     try:
         label_array = np.zeros((25, config.NUM_CLASSES))
-        for i in range(25):
+        for i in range(len(label)):
             try:
                 label_array[i, config.CHAR_VECTOR.index(label[i])] = 1
             except Exception as ex:
                 label_array[i, 0] = 1
+        return label_array
+    except Exception as ex:
+        print(label)
+        raise ex
+
+def label_to_array_2(label):
+    try:
+        label_array = np.zeros((25))
+        for i in range(len(label)):
+            try:
+                label_array[i] = config.CHAR_VECTOR.index(label[i])
+            except Exception as ex:
+                label_array[i] = 0
         return label_array
     except Exception as ex:
         print(label)

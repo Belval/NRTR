@@ -25,7 +25,9 @@ class NRTR(object):
         with self.__session.as_default():
             (
                 self.__inputs,
-                self.__targets,
+                self.__seq_len,
+                self.__targets_1,
+                self.__targets_2,
                 self.__iteration_n,
                 self.__is_training,
                 self.__output,
@@ -34,7 +36,8 @@ class NRTR(object):
                 self.__optimizer,
                 self.__init,
                 self.__a1,
-                self.__a2
+                self.__a2,
+                self.__weight_mask
             ) = self.nrtr(max_image_width, batch_size)
 
             self.__init.run()
@@ -241,7 +244,7 @@ class NRTR(object):
             ln_1 = layer_norm(mha_1)
 
             # Add op with previous
-            add_1 = tf.add(ln_1, targets)
+            add_1 = tf.add(ln_1, positional_encoding)
 
             # Multi-Head Attention
             mha_2 = multi_head_attention(x, x, positional_encoding, is_training)
@@ -264,11 +267,16 @@ class NRTR(object):
             return add_3
 
         inputs = tf.placeholder(tf.float32, [batch_size, max_width, 32, 1])
-        targets = tf.placeholder(tf.float32, [batch_size, 25, config.NUM_CLASSES])
+
+        is_training = tf.placeholder(tf.bool, name='is_training')
+
+        seq_len = tf.placeholder(tf.int32, [batch_size])
+        targets_1 = tf.placeholder(tf.float32, [batch_size, 25, config.NUM_CLASSES])
+        targets_2 = tf.placeholder(tf.int32, [batch_size, 25])
+
         # The iteration number, used in calculating the learning rate
         iteration_n = tf.placeholder(tf.float32, [1])
         # Define if we are training, used by dropout layers
-        is_training = tf.placeholder(tf.bool, name='is_training')
 
         # First modality transform block
         mtb_1 = modality_transform_block(inputs)
@@ -279,16 +287,17 @@ class NRTR(object):
         # Positional Encoding
         positional_encoding_1 = positional_encoding(linear_1)
 
+        # Obviously it's not a real encoder output yet
+        encoder_outputs = positional_encoding_1
+
         # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
         for _ in range(6):
-            encoder_outputs = encoder(positional_encoding_1, is_training)
+            encoder_outputs = encoder(encoder_outputs, is_training)
 
         encoder_outputs = layer_norm(encoder_outputs)
 
-        print(encoder_outputs.get_shape().as_list())
-
         # Positional encoding
-        positional_encoding_2 = positional_encoding(targets)
+        positional_encoding_2 = positional_encoding(targets_1)
 
         # Here 6 is arbitrary, according to paper it could be anywhere between 4 and 12
         for i in range(6):
@@ -296,53 +305,56 @@ class NRTR(object):
 
         decoder_outputs = layer_norm(decoder_outputs)
 
-        print(decoder_outputs.get_shape().as_list())
-
         output_probabilities = tf.layers.dense(decoder_outputs, config.NUM_CLASSES, activation=tf.contrib.layers.softmax)
 
+        weight_masks = tf.sequence_mask(lengths=seq_len, maxlen=25, dtype=tf.float32)
+
         # Original paper does not mention a loss or cost function
-        loss = tf.losses.softmax_cross_entropy(targets, output_probabilities)
+        loss = tf.contrib.seq2seq.sequence_loss(logits=output_probabilities, targets=targets_2, weights=weight_masks)
 
         # I did not implement pretraining so we'll use only the relevant part of the equation presented p.5
-        learning_rate = tf.reduce_sum(tf.pow(tf.cast(mtb_1.get_shape().as_list()[2], tf.float32) / 10, -0.5) * tf.pow(iteration_n, -0.5))
+        learning_rate = tf.reduce_sum(tf.pow(tf.cast(mtb_1.get_shape().as_list()[2], tf.float32), -0.5) * tf.pow(iteration_n, -0.5))
 
         # Learning rate is defined by a formula in the original paper. The 0.001 value is a placeholder
         optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.9, beta2=0.98, epsilon=1e-9).minimize(loss)
 
         init = tf.global_variables_initializer()
 
-        return inputs, targets, iteration_n, is_training, output_probabilities, loss, learning_rate, optimizer, init, encoder_outputs, decoder_outputs
+        return inputs, seq_len, targets_1, targets_2, iteration_n, is_training, output_probabilities, loss, learning_rate, optimizer, init, encoder_outputs, decoder_outputs, weight_masks
 
     def train(self, iteration_count):
         with self.__session.as_default():
             print('Training')
             for i in range(self.step, iteration_count + self.step):
                 iter_loss = 0
-                for batch_y, batch_dt, batch_x in self.__data_manager.train_batches:
-                    _, output, loss_value, learning_rate, a1, a2 = self.__session.run(
-                        [self.__optimizer, self.__output, self.__loss, self.__learning_rate, self.__a1, self.__a2],
+                for batch_y, batch_seq_len, batch_dt, batch_dt_2, batch_x in self.__data_manager.train_batches:
+                    _, output, loss_value, learning_rate, a1, a2, wm = self.__session.run(
+                        [self.__optimizer, self.__output, self.__loss, self.__learning_rate, self.__a1, self.__a2, self.__weight_mask],
                         feed_dict={
                             self.__inputs: batch_x,
-                            self.__targets: batch_dt,
+                            self.__seq_len: batch_seq_len,
+                            self.__targets_1: batch_dt,
+                            self.__targets_2: batch_dt_2,
                             self.__iteration_n: [float(i) + 1.], # +1 because 0^(0.5) is undefined obviously
                             self.__is_training: True
                         }
                     )
 
-                    ##print('------------')
-                    ##print(a1[0][0][200:215])
-                    ##print(a2[0][0][0:15])
-                    ##print(output[0][0][0:15])
-                    ##print('------------')
-                    ##print(a1[1][0][200:215])
-                    ##print(a2[1][0][0:15])
-                    ##input(output[1][0][0:15])
-
-                    if i % 100 == 0:
+                    #print(batch_y[0])
+                    #print(wm[0])
+                    #input()
+#
+                    if i % 10 == 0:
                         for j in range(2):
                             print(batch_y[j])
+                            print(batch_dt[j])
                             print(ground_truth_to_word(output[j]))
-                        print(output[0][0][0:15])
+                    #    print(output[0][0][0:15])
+                    #    print('------------')
+                    #    print(a2[0][0][0:15])
+                    #    print('------------')
+                    #    print(a2[1][0][0:15])
+                    #    input()
 
                     iter_loss += loss_value
 
@@ -360,15 +372,18 @@ class NRTR(object):
     def test(self):
         with self.__session.as_default():
             print('Testing')
-            for batch_y, _, batch_x in self.__data_manager.test_batches:
+            for batch_y, batch_dt, batch_x in self.__data_manager.test_batches:
+                print("blah")
                 output = self.__session.run(
                     self.__output,
                     feed_dict={
                         self.__inputs: batch_x,
+                        self.__targets_1: batch_dt,
                         self.__is_training: False
                     }
                 )
 
                 for i, y in enumerate(batch_y):
                     print(batch_y[i])
+                    print(batch_x[i])
                     print(ground_truth_to_word(output[i]))

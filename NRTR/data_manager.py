@@ -3,7 +3,7 @@ import os
 import numpy as np
 import config
 
-from utils import resize_image, label_to_array
+from utils import resize_image, label_to_array, label_to_array_2
 
 class DataManager(object):
     def __init__(self, batch_size, model_path, examples_path, max_image_width, train_test_ratio):
@@ -35,7 +35,7 @@ class DataManager(object):
         count = 0
         skipped = 0
         for i, f in enumerate(os.listdir(self.examples_path)):
-            if i > 50000:
+            if i > 100000:
                 break
             if len(f.split('_')[0]) > self.max_char_count:
                 continue
@@ -47,7 +47,8 @@ class DataManager(object):
                 (
                     arr,
                     f.split('_')[0].lower(),
-                    label_to_array(f.split('_')[0].lower())
+                    label_to_array(f.split('_')[0].lower()),
+                    label_to_array_2(f.split('_')[0].lower())
                 )
             )
             count += 1
@@ -65,10 +66,15 @@ class DataManager(object):
 
             self.current_train_offset = new_offset
 
-            raw_batch_x, raw_batch_y, raw_batch_la = zip(*self.data[old_offset:new_offset])
+            raw_batch_x, raw_batch_y, raw_batch_la, raw_batch_la_2 = zip(*self.data[old_offset:new_offset])
 
             batch_y = np.reshape(
                 np.array(raw_batch_y),
+                (-1)
+            )
+
+            batch_seq_len = np.reshape(
+                [len(y) for y in raw_batch_y],
                 (-1)
             )
 
@@ -77,12 +83,17 @@ class DataManager(object):
                 (-1, 25, config.NUM_CLASSES)
             )
 
+            batch_dt_2 = np.reshape(
+                np.array(raw_batch_la_2),
+                (-1, 25)
+            )
+
             batch_x = np.reshape(
                 np.array(raw_batch_x),
                 (-1, self.max_image_width, 32, 1)
             )
 
-            train_batches.append((batch_y, batch_dt, batch_x))
+            train_batches.append((batch_y, batch_seq_len, batch_dt, batch_dt_2, batch_x))
         return train_batches
 
     def __generate_all_test_batches(self):
@@ -94,16 +105,20 @@ class DataManager(object):
 
             self.current_test_offset = new_offset
 
-            raw_batch_x, raw_batch_y, raw_batch_la = zip(*self.data[old_offset:new_offset])
+            raw_batch_x, raw_batch_y, raw_batch_la, _ = zip(*self.data[old_offset:new_offset])
 
             batch_y = np.reshape(
                 np.array(raw_batch_y),
                 (-1)
             )
 
-            batch_dt = np.reshape(
-                np.array(raw_batch_la),
-                (-1, 25, config.NUM_CLASSES)
+            batch_dt = np.zeros(
+                np.shape(
+                    np.reshape(
+                        np.array(raw_batch_la),
+                        (-1, 25, config.NUM_CLASSES)
+                    )
+                )
             )
 
             batch_x = np.reshape(
