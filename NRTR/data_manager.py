@@ -35,7 +35,7 @@ class DataManager(object):
         count = 0
         skipped = 0
         for i, f in enumerate(os.listdir(self.examples_path)):
-            if i > 100000:
+            if i > 10000:
                 break
             if len(f.split('_')[0]) > self.max_char_count:
                 continue
